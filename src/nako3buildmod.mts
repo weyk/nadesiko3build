@@ -26,12 +26,11 @@ import app from 'nadesiko3/src/commander_ja.mjs'
 import { NakoGenOptions } from 'nadesiko3/core/src/nako_gen.mjs'
 
 // __dirname のために
-import url from 'url'
+import url from 'node:url'
 const __filename = url.fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
-
-const srcDir:{'src':string,'coresrc':string, 'nakorelease':string, 'release':string} = {
+const srcDir:{'src':string, 'coresrc':string, 'nakorelease':string, 'release':string} = {
   'src': path.join(__dirname, '..', 'node_modules', 'nadesiko3', 'src'),
   'coresrc': path.join(__dirname, '..', 'node_modules', 'nadesiko3', 'core', 'src'),
   'nakorelease': path.join(__dirname, '..', 'node_modules', 'nadesiko3', 'release'),
@@ -48,7 +47,7 @@ type StandAloneFiles = {
 
 type TargetKey = keyof StandAloneFiles
 
-const standalone_files:StandAloneFiles[] = [
+const standaloneFiles:StandAloneFiles[] = [
   {
     fromDir: 'src',
     commonFiles: ['nako_version.mjs'],
@@ -78,7 +77,7 @@ const standalone_files:StandAloneFiles[] = [
 // Webpackでplugin_nodeにまとめる場合はnodeFilesは不要になる。
 // Webpackでplugin_browserにまとめる場合はwebFilesは不要になる。
 // 上記のどちらも不要であればnullとすることが可能
-const standalone_modules: null|StandAloneFiles = null
+const standaloneModules: null|StandAloneFiles = null
 /*
 {
   fromDir: 'modules',
@@ -109,6 +108,11 @@ interface Nako3BuildArgOptions {
   webworker: boolean
 }
 
+type ImportedPlugin = {
+  name: string
+  path: string
+}
+
 interface Nako3BuildOptions {
   nostd: boolean
 }
@@ -118,17 +122,19 @@ export class Nako3Build extends NakoCompiler {
   debug: boolean
   version: string
   pluginstd: boolean
+  importedPluginList: ImportedPlugin[]
 
   constructor (opts:Nako3BuildOptions = { nostd: false }) {
     super({ useBasicPlugin: !opts.nostd })
     this.debug = false
     this.pluginstd = !opts.nostd
     this.filename = 'main.nako3'
+    this.importedPluginList = []
     this.version = nakoVersion.version
     // 必要な定数を設定
     this.addListener('beforeRun', (g: NakoGlobal) => {
-      g.__varslist[0]['ナデシコ種類'] = 'nako3build'
-      g.__varslist[0]['ナデシコバージョン'] = this.version
+      g.__varslist[0].set('ナデシコ種類', 'nako3build')
+      g.__varslist[0].set('ナデシコバージョン', this.version)
     })
   }
 
@@ -245,8 +251,7 @@ export class Nako3Build extends NakoCompiler {
     if (this.pluginstd) {
       if (opt.web) {
         this.addPluginFile('PluginBrowser', path.join(__dirname, 'plugin_browser.mjs'), PluginBrowser)
-      } else
-      if (opt.webworker) {
+      } else if (opt.webworker) {
         this.addPluginFile('PluginBrowserInWorker', path.join(__dirname, 'plugin_browser_in_worker.mjs'), PluginBrowserInWorker)
         this.addPluginFile('PluginWorker', path.join(__dirname, 'plugin_worker.mjs'), PluginWorker)
       } else {
@@ -255,25 +260,21 @@ export class Nako3Build extends NakoCompiler {
     }
 
     if (opt.generator) {
-      await this.addGenerator(opt.generator)
+      try {
+        await this.addGenerator(opt.generator)
+      } catch (err: any) {
+        this.logger.error(err)
+        return
+      }
     }
 
     if (typeof opt.plugin === 'string') {
-      opt.plugin = opt.plugin.split(",")
-
-      let causeError = false
-      for (const plugin of opt.plugin) {
-        const pluginPath = Nako3Build.findJSPluginFile(plugin, this.filename, __dirname, [], opt.web || opt.webworker)
-        if (pluginPath !== '') {
-          const pluginModule = await import(`file://${pluginPath}`)
-          this.addPluginFile(plugin, pluginPath, pluginModule.default)
-        } else {
-          console.error(`指定されたプラグインがみつかりませんでした:${plugin}`)
-          causeError = true
-        }
-      }
-      if (causeError) {
-        process.exit(1)
+      opt.plugin = opt.plugin.split(',')
+      try {
+        this.importedPluginList = await this.importPlugin(opt.plugin, opt.web || opt.webworker)
+      } catch (err: any) {
+        this.logger.error(err)
+        return
       }
     }
 
@@ -314,32 +315,40 @@ export class Nako3Build extends NakoCompiler {
     // 依存ライブラリなどを読み込む
     await this.loadDependencies(src, this.filename, '')
     // JSにコンパイル
-    const basePlugin = opt.webworker ? ['plugin_browser_in_worker.mjs', 'plugin_worker.mjs']: [opt.web ? 'plugin_browser.js' : 'plugin_node.mjs']
+    const basePlugin = opt.webworker ? ['plugin_browser_in_worker.mjs', 'plugin_worker.mjs'] : [opt.web ? 'plugin_browser.js' : 'plugin_node.mjs']
     const genOpt = new NakoGenOptions(
       isTest,
       [...opt.plugin, ...basePlugin],
-      'self.__varslist[0][\'ナデシコ種類\']=\''+(opt.web ? 'wnako3' : opt.webworker ? 'wwnako3' : 'cnako3' )+'\';'
+      'self.__varslist[0][\'ナデシコ種類\']=\'' + (opt.web ? 'wnako3' : opt.webworker ? 'wwnako3' : 'cnako3') + '\';'
     )
 
     const jscode = this.compileStandalone(src, this.filename, genOpt)
+    // @ts-ignore
+    const funcs = this.usedFuncs.values()
+    // @ts-ignore
+    const funclist = this.funclist
+    // console.log(funcs)
+    for (const funcname of funcs) {
+      const func = funclist.get(funcname)
+      // console.log(func)
+    }
     if (opt.web || opt.webworker) {
-      opt.output = opt.output.replace(/\.mjs$/, ".js")
+      opt.output = opt.output.replace(/\.mjs$/, '.js')
     }
     console.log(opt.output)
     if (opt.web || opt.webworker) {
-      const fh = await fsp.open(opt.output, "w")
+      const fh = await fsp.open(opt.output, 'w')
       let i = 0
       const lines = jscode.split(/\r\n|\r|\n/)
       while (i < lines.length) {
         let t = lines[i]
         if (/^import/.test(t)) {
           t = t.replace(/\.mjs/, '.js')
-        } else
-        if (/self\.clearFuncList\.map/.test(t)) {
+        } else if (/self\.clearFuncList\.map/.test(t)) {
           t = t.replace(/self\./, '// self.')
         }
-        t = t + "\n"
-        await fh.write(t, null, "utf-8")
+        t = t + '\n'
+        await fh.write(t, null, 'utf-8')
         i++
       }
       await fh.close()
@@ -353,15 +362,15 @@ export class Nako3Build extends NakoCompiler {
 
     // 実行に必要なファイルのコピーを行う
     const targetKeys:TargetKey[] = ['commonFiles', opt.webworker ? 'webworkerFiles' : opt.web ? 'webFiles' : 'nodeFiles']
-    for (const filesInfo of standalone_files) {
+    for (const filesInfo of standaloneFiles) {
       for (const targetKey of targetKeys) {
         const item = filesInfo[targetKey]
         if (item !== null) {
           for (const mod of item) {
             const destMod = opt.web ? mod.replace(/\.mjs/, '.js') : mod
-            if (filesInfo.fromDir !== 'release' && ( opt.web || opt.webworker)) {
-              const data = await fsp.readFile(path.join(srcDir[filesInfo.fromDir], mod), { encoding: "utf-8" })
-              const fh = await fsp.open(path.join(outRuntime, destMod), "w")
+            if (filesInfo.fromDir !== 'release' && (opt.web || opt.webworker)) {
+              const data = await fsp.readFile(path.join(srcDir[filesInfo.fromDir], mod), { encoding: 'utf-8' })
+              const fh = await fsp.open(path.join(outRuntime, destMod), 'w')
               let i = 0
               const lines = data.split(/\r\n|\r|\n/)
               while (i < lines.length) {
@@ -369,8 +378,8 @@ export class Nako3Build extends NakoCompiler {
                 if (/^import/.test(t)) {
                   t = t.replace(/\.mjs/, '.js')
                 }
-                t = t + "\n"
-                await fh.write(t, null, "utf-8")
+                t = t + '\n'
+                await fh.write(t, null, 'utf-8')
                 i++
               }
               await fh.close()
@@ -382,40 +391,39 @@ export class Nako3Build extends NakoCompiler {
       }
     }
 
-    if (opt.plugin.length > 0) {
-      for (const plugin of opt.plugin) {
+    if (this.importedPluginList.length > 0) {
+      for (const importedPlugin of this.importedPluginList) {
+        const plugin = importedPlugin.name
+        const pluginPath = importedPlugin.path
         if (plugin != null && plugin !== '') {
-          const pluginPath = Nako3Build.findJSPluginFile(plugin, this.filename, __dirname, [], opt.web || opt.webworker)
-          if (pluginPath !== '') {
-            const mod = plugin
-            const destMod = opt.web ? plugin.replace(/\.mjs/, '.js') : mod
-            if (!/\\release$/.test(path.dirname(pluginPath)) && ( opt.web || opt.webworker)) {
-              const data = await fsp.readFile(pluginPath, { encoding: "utf-8" })
-              const fh = await fsp.open(path.join(outRuntime, destMod), "w")
-              let i = 0
-              const lines = data.split(/\r\n|\r|\n/)
-              while (i < lines.length) {
-                let t = lines[i]
-                if (/^import/.test(t)) {
-                  t = t.replace(/\.mjs/, '.js')
-                }
-                t = t + "\n"
-                await fh.write(t, null, "utf-8")
-                i++
+          const mod = plugin
+          const destMod = opt.web ? plugin.replace(/\.mjs/, '.js') : mod
+          if (!/\\release$/.test(path.dirname(pluginPath)) && (opt.web || opt.webworker)) {
+            const data = await fsp.readFile(pluginPath, { encoding: 'utf-8' })
+            const fh = await fsp.open(path.join(outRuntime, destMod), 'w')
+            let i = 0
+            const lines = data.split(/\r\n|\r|\n/)
+            while (i < lines.length) {
+              let t = lines[i]
+              if (/^import/.test(t)) {
+                t = t.replace(/\.mjs/, '.js')
               }
-              await fh.close()
-            } else {
-              fs.copyFileSync(plugin, path.join(outRuntime, destMod))
+              t = t + '\n'
+              await fh.write(t, null, 'utf-8')
+              i++
             }
+            await fh.close()
+          } else {
+            fs.copyFileSync(plugin, path.join(outRuntime, destMod))
           }
         }
       }
     }
 
     // 実行に必要なモジュールのコピーを行う
-    if (standalone_modules !== null) {
+    if (standaloneModules !== null) {
       for (const targetKey of targetKeys) {
-        const modlist = standalone_modules[targetKey]
+        const modlist = standaloneModules[targetKey]
         if (modlist !== null) {
           // or 以下のコピーだと依存ファイルがコピーされない package.jsonを見てコピーする必要がある
           const orgModule = path.join(__dirname, '..', 'node_modules')
@@ -445,15 +453,44 @@ export class Nako3Build extends NakoCompiler {
   }
 
   async addGenerator (generatorFile: string) {
-    const filepath = Nako3Build.findJSPluginFile (generatorFile, this.filename, __dirname, [], true)
+    const log: string[] = []
+    const filepath = Nako3Build.findJSPluginFile(generatorFile, this.filename, __dirname, log, true)
     if (filepath !== '') {
-      const module = await import(filepath)
+      this.logger.trace(log.join('\n'))
+      const module = await import(url.pathToFileURL(filepath).href)
       const gen = module.default
       gen.selfRegister(this)
     } else {
-      console.error(`指定されたコードジェネレータがみつかりませんでした:${generatorFile}`)
-      process.exit(1)
+      this.logger.trace(log.join('\n'))
+      throw new Error(`指定されたコードジェネレータがみつかりませんでした:${generatorFile}`)
     }
+  }
+
+  async importPlugin (plugins: string[], isWeb: boolean) {
+    let causeError = false
+    const importedPluginList: ImportedPlugin[] = []
+    for (const plugin of plugins) {
+      const log: string[] = []
+      const pluginPath = Nako3Build.findJSPluginFile(plugin, this.filename, __dirname, log, isWeb)
+      if (pluginPath !== '') {
+        this.logger.trace(log.join('\n'))
+        const pluginModule = await import(url.pathToFileURL(pluginPath).href)
+        if (pluginModule && pluginModule.default) {
+          this.addPluginFile(plugin, pluginPath, pluginModule.default)
+          importedPluginList.push({ name: plugin, path: pluginPath })
+        } else {
+          console.warn(`exportが無いため取り込まれません:${plugin}`)
+        }
+      } else {
+        this.logger.trace(log.join('\n'))
+        console.error(`指定されたプラグインがみつかりませんでした:${plugin}`)
+        causeError = true
+      }
+    }
+    if (causeError) {
+      throw new Error('指定されたプラグインの中に見つからないものがありました')
+    }
+    return importedPluginList
   }
 
   /**
@@ -695,6 +732,7 @@ export class Nako3Build extends NakoCompiler {
     const cachePath: {[key: string]: boolean} = {}
     /** キャッシュ付きでファイルがあるか検索 */
     const exists = (f: string): boolean => {
+      if (f.startsWith('file:/')) { f = url.fileURLToPath(f) }
       // 同じパスを何度も検索することがないように
       if (cachePath[f]) { return cachePath[f] }
       try {
@@ -715,21 +753,58 @@ export class Nako3Build extends NakoCompiler {
       return bExists
     }
     /** 通常 + package.json のパスを調べる */
-    const fCheckEx = (pathTest: string, desc: string): string => {
+    const fCheckEx = (pathTestBase: string, pathTest: string, desc: string): string => {
       // 直接JSファイルが指定された？
-      if (/\.(js|mjs)$/.test(pathTest)) {
-        if (fCheck(pathTest, desc)) { return pathTest }
+      if (/\.(js|cjs|mjs)$/.test(pathTest)) {
+        const pathTestTarget = path.join(pathTestBase, pathTest)
+        if (fCheck(pathTestTarget, desc)) { return pathTestTarget }
       }
+      const pathSlash = pathTest.replace(/\\/g, '/')
+      const paths = pathSlash.split('/')
+      const pathTestJson = path.join(pathTestBase, paths[0])
       // 指定パスのpackage.jsonを調べる
-      const json = path.join(pathTest, 'package.json')
-      if (fCheck(json, desc + '/package.json')) {
+      const json = path.join(pathTestJson, 'package.json')
+      if (paths.length === 1 && fCheck(json, desc + '/package.json')) {
         // package.jsonを見つけたので、メインファイルを調べて取り込む (CommonJSモジュール対策)
         const jsonText = fs.readFileSync(json, 'utf-8')
         const obj = JSON.parse(jsonText)
-        if (!obj.main) { return '' }
-        const mainFile = path.resolve(path.join(pathTest, obj.main))
-        return mainFile
+        let mainFile: string = ''
+        if (paths.length === 1) {
+          if (isWeb && obj.browser) {
+            mainFile = obj.browser
+          } else if (obj.main) {
+            mainFile = obj.main
+          }
+        }
+        if (!mainFile) { return '' }
+        const mainPath = path.resolve(path.join(pathTestJson, mainFile))
+        return mainPath
       }
+      return ''
+    }
+
+    const fCheckNako3 = (nodeModulesBase: string, descBase: string): string => {
+      // nadesiko3 | ランタイムパス/node_modules/nadesiko3/release/<plugin>
+      if (isWeb) {
+        const pathRuntimeRelease = path.join(nodeModulesBase, 'nadesiko3', 'release')
+        const fileRuntimeRelease = fCheckEx(pathRuntimeRelease, pname, 'nadesiko3')
+        if (fileRuntimeRelease) { return fileRuntimeRelease }
+      }
+      // nadesiko3 | ランタイムパス/node_modules/nadesiko3/src/<plugin>
+      const pathRuntimeSrc = path.join(nodeModulesBase, 'nadesiko3', 'src')
+      const fileRuntimeSrc = fCheckEx(pathRuntimeSrc, pname, 'nadesiko3')
+      if (fileRuntimeSrc) { return fileRuntimeSrc }
+
+      // nadesiko3/core | ランタイムパス/node_modules/nadesiko3/src/<plugin>
+      const pathRuntimeInCoreSrc = path.join(nodeModulesBase, 'nadesiko3', 'core', 'src')
+      const fileRuntimeInCoreSrc = fCheckEx(pathRuntimeInCoreSrc, pname, 'nadesiko3core')
+      if (fileRuntimeInCoreSrc) { return fileRuntimeInCoreSrc }
+
+      // nadesiko3core | ランタイムパス/node_modules/nadesiko3core/src/<plugin>
+      const pathRuntimeCoreSrc = path.join(nodeModulesBase, 'nadesiko3core', 'src')
+      const fileRuntimeCoreSrc = fCheckEx(pathRuntimeCoreSrc, pname, 'nadesiko3core')
+      if (fileRuntimeCoreSrc) { return fileRuntimeCoreSrc }
+
       return ''
     }
 
@@ -740,102 +815,104 @@ export class Nako3Build extends NakoCompiler {
     // 各パスを検索していく
     const p1 = pname.substring(0, 1)
     // フルパス指定か?
-    if (p1 === '/' || pname.substring(1, 3).toLowerCase() === ':\\' || pname.substring(0, 6) === 'file:/') {
-      const fileFullpath = fCheckEx(pname, 'フルパス')
-      if (fileFullpath) { return fileFullpath }
+    if (p1 === '/' || pname.substring(1, 3).toLowerCase() === ':\\' || pname.startsWith('file:/')) {
+      const fileFullpath = fCheck(pname, 'フルパス')
+      if (fileFullpath) { return pname }
       return '' // フルパスの場合別のフォルダは調べない
     }
     // 相対パスか?
-    if (p1 === '.' || pname.indexOf('/') >= 0) {
+    if (pname.startsWith('../') || pname.startsWith('./')) {
       // 相対パス指定なので、なでしこのプログラムからの相対指定を調べる
-      const pathRelative = path.join(path.resolve(path.dirname(filename)), pname)
-      const fileRelative = fCheckEx(pathRelative, '相対パス')
+      const pathRelative = path.resolve(path.dirname(filename))
+      const fileRelative = fCheckEx(pathRelative, pname, '相対パス')
       if (fileRelative) { return fileRelative }
       return '' // 相対パスの場合も別のフォルダは調べない
     }
     // plugin_xxx.mjs のようにファイル名のみが指定された場合のみ、いくつかのパスを調べる
     // 母艦パス(元ファイルと同じフォルダ)か?
     const testScriptPath = path.join(path.resolve(path.dirname(filename)), pname)
-    const fileScript = fCheckEx(testScriptPath, '母艦パス')
+    const fileScript = fCheckEx(path.resolve(path.dirname(filename)), pname, '母艦パス')
     if (fileScript) { return fileScript }
 
+    // ランタイムパス
+    // nako3buildmod.mjs は ランタイム/src に配置されていることが前提
+    const nako3buildRoot = path.resolve(__dirname, '..')
+
     // ランタイムパス/src/<plugin>
-    if (pname.match(/^\.[cm]?js/)) {
-      // cnako3mod.mjs は ランタイム/src に配置されていることが前提
-      const pathRoot = path.resolve(__dirname, '..')
+    if (pname.match(/\.(js|cjs|mjs)$/)) {
       if (isWeb) {
         // ランタイム/release/<plugin>
-        const pathRelease = path.join(pathRoot, 'release', pname)
-        const fileRelease = fCheck(pathRelease, 'CNAKO3パス')
-        if (fileRelease) { return pathRelease }
+        const pathRelease = path.join(nako3buildRoot, 'release', pname)
+        const existRelease = fCheck(pathRelease, 'NAKO3BUILDパス')
+        if (existRelease) { return pathRelease }
       }
       // ランタイム/src/<plugin>
-      const pathRuntimeSrc = path.join(pathRoot, 'src', pname)
-      const fileRuntimeSrc = fCheck(pathRuntimeSrc, 'CNAKO3パス')
-      if (fileRuntimeSrc) { return pathRuntimeSrc }
+      const pathSrc = path.join(nako3buildRoot, 'src', pname)
+      const existSrc = fCheck(pathSrc, 'NAKO3BUILDパス')
+      if (existSrc) { return pathSrc }
     }
 
     // 環境変数をチェック
     // 環境変数 NAKO_LIB か?
     if (process.env.NAKO_LIB) {
-      const NAKO_LIB = path.join(path.resolve(process.env.NAKO_LIB), pname)
-      const fileLib = fCheckEx(NAKO_LIB, 'NAKO_LIB')
+      const NAKO_LIB = path.resolve(process.env.NAKO_LIB)
+      const fileLib = fCheckEx(NAKO_LIB, pname, 'NAKO_LIB')
       if (fileLib) { return fileLib }
     }
 
     // ランタイムパス/node_modules/<plugin>
-    const pathRuntime = path.join(path.dirname(path.resolve(__dirname)))
-    const pathRuntimePname = path.join(pathRuntime, 'node_modules', pname)
-    const fileRuntime = fCheckEx(pathRuntimePname, 'runtime')
+    const pathModules = path.join(nako3buildRoot, 'node_modules')
+    if (pname.match(/\.(js|cjs|mjs)$/)) {
+      const fileModulesNako3 = fCheckNako3(pathModules, 'runtime/')
+      if (fileModulesNako3) { return fileModulesNako3 }
+    }
+    const fileRuntime = fCheckEx(pathModules, pname, 'runtime')
     if (fileRuntime) { return fileRuntime }
 
     // ランタイムと同じ配置 | ランタイムパス/../<plugin>
-    const runtimeLib = path.join(pathRuntime, '..', pname)
-    const fileLib = fCheckEx(runtimeLib, 'runtimeLib')
-    if (fileLib) { return fileLib }
-
-    if (pname.match(/^\.[cm]?js/)) {
-      // nadesiko3 | ランタイムパス/node_modules/nadesiko3/src/<plugin>
-      const pathRuntimeSrc = path.join(pathRuntime, 'node_modules', 'nadesiko3', 'src', pname)
-      const fileRuntimeSrc = fCheckEx(pathRuntimeSrc, 'nadesiko3')
-      if (fileRuntimeSrc) { return fileRuntimeSrc }
-      if (isWeb) {
-        const pathRuntimeRelease = path.join(pathRuntime, 'node_modules', 'nadesiko3', 'release', pname)
-        const fileRuntimeRelease = fCheckEx(pathRuntimeRelease, 'nadesiko3')
-        if (fileRuntimeRelease) { return fileRuntimeRelease }
-      }
-
-      // nadesiko3/core | ランタイムパス/node_modules/nadesiko3/src/<plugin>
-      const pathRuntimeInCoreSrc = path.join(pathRuntime, 'node_modules', 'nadesiko3', 'core', 'src', pname)
-      const fileRuntimeInCoreSrc = fCheckEx(pathRuntimeInCoreSrc, 'nadesiko3core')
-      if (fileRuntimeInCoreSrc) { return fileRuntimeInCoreSrc }
-
-      // nadesiko3core | ランタイムパス/node_modules/nadesiko3core/src/<plugin>
-      const pathRuntimeCoreSrc = path.join(pathRuntime, 'node_modules', 'nadesiko3core', 'src', pname)
-      const fileRuntimeCoreSrc = fCheckEx(pathRuntimeCoreSrc, 'nadesiko3core')
-      if (fileRuntimeCoreSrc) { return fileRuntimeCoreSrc }
+    const runtimeLib = path.join(nako3buildRoot, '..')
+    if (pname.match(/\.(js|cjs|mjs)$/)) {
+      const fileLibNako3 = fCheckNako3(runtimeLib, 'runtimeLib/')
+      if (fileLibNako3) { return fileLibNako3 }
     }
+    const fileLib = fCheckEx(runtimeLib, pname, 'runtimeLib')
+    if (fileLib) { return fileLib }
 
     // 環境変数 NAKO_HOMEか?
     if (process.env.NAKO_HOME) {
-      const NAKO_HOME = path.join(path.resolve(process.env.NAKO_HOME), 'node_modules', pname)
-      const fileHome = fCheckEx(NAKO_HOME, 'NAKO_HOME')
+      const NAKO_HOME = path.resolve(process.env.NAKO_HOME)
+      const fileHome = fCheckEx(NAKO_HOME, pname, 'NAKO_HOME')
       if (fileHome) { return fileHome }
+
       if (isWeb) {
         // NAKO_HOME/release ?
-        const pathNakoHomeRelease = path.join(NAKO_HOME, 'release', pname)
-        const fileNakoHomeRelease = fCheckEx(pathNakoHomeRelease, 'NAKO_HOME/release')
+        const pathNakoHomeRelease = path.join(NAKO_HOME, 'release')
+        const fileNakoHomeRelease = fCheckEx(pathNakoHomeRelease, pname, 'NAKO_HOME/release')
         if (fileNakoHomeRelease) { return fileNakoHomeRelease }
       }
+
       // NAKO_HOME/src ?
-      const pathNakoHomeSrc = path.join(NAKO_HOME, 'src', pname)
-      const fileNakoHomeSrc = fCheckEx(pathNakoHomeSrc, 'NAKO_HOME/src')
+      const pathNakoHomeSrc = path.join(NAKO_HOME, 'src')
+      const fileNakoHomeSrc = fCheckEx(pathNakoHomeSrc, pname, 'NAKO_HOME/src')
       if (fileNakoHomeSrc) { return fileNakoHomeSrc }
+
+      // NAKO_HOME/core/src ?
+      const pathNakoHomeCoreSrc = path.join(NAKO_HOME, 'core', 'src')
+      const fileNakoHomeCoreSrc = fCheckEx(pathNakoHomeCoreSrc, pname, 'NAKO_HOME/core/src')
+      if (fileNakoHomeCoreSrc) { return fileNakoHomeCoreSrc }
+
+      const nekoHomeModules = path.join(NAKO_HOME, 'node_modules')
+      if (pname.match(/\.(js|cjs|mjs)$/)) {
+        const fileHomeModulesNako3 = fCheckNako3(nekoHomeModules, 'NAKO_HOME/node_modules/')
+        if (fileHomeModulesNako3) { return fileHomeModulesNako3 }
+      }
+      const fileHomeModules = fCheckEx(nekoHomeModules, pname, 'NAKO_HOME/node_modules')
+      if (fileHomeModules) { return fileHomeModules }
     }
     // 環境変数 NODE_PATH (global) 以下にあるか？
     if (process.env.NODE_PATH) {
-      const pathNode = path.join(path.resolve(process.env.NODE_PATH), pname)
-      const fileNode = fCheckEx(pathNode, 'NODE_PATH')
+      const pathNode = path.join(path.resolve(process.env.NODE_PATH))
+      const fileNode = fCheckEx(pathNode, pname, 'NODE_PATH')
       if (fileNode) { return fileNode }
     }
     // Nodeのパス検索には任せない(importで必ず失敗するので)
